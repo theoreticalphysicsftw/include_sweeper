@@ -1,5 +1,5 @@
 #!/bin/bash
-if [ $1 == "--debug" ] 
+if [ "$1" == "--debug" ] 
 then
     echo "Debug build..."
     gcc -g -nostdlib -nostartfiles -o build/include_sweeper include_sweeper.c
