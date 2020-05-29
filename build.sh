@@ -2,7 +2,7 @@
 if [ "$1" == "--debug" ] 
 then
     echo "Debug build..."
-    gcc -g -nostdlib -nostartfiles -o build/include_sweeper include_sweeper.c
+    gcc -Wall -Wextra -pedantic -g -nostdlib -nostartfiles -static -o build/include_sweeper include_sweeper.c
 else
     echo "Release build..."
     gcc -Os -nostdlib -nostartfiles -nodefaultlibs -static -fno-asynchronous-unwind-tables -s -o build/include_sweeper include_sweeper.c
