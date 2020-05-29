@@ -202,13 +202,13 @@ FORCE_INLINE void exit(int status)
 
 void* mmap(void *addr, size_t length, int prot, int flags, int fd, offset_t offset)
 {
-    (void*) syscall6(SYSCALL_NUMBER_MMAP, (i64) addr, (i64) length, prot, flags, fd, offset);
+    return (void*) syscall6(SYSCALL_NUMBER_MMAP, (size_t) addr, length, prot, flags, fd, offset);
 }
 
 
 int munmap(void *addr, size_t length)
 {
-    return syscall2(SYSCALL_NUMBER_MUNMAP, (i64) addr, (i64) length);
+    return syscall2(SYSCALL_NUMBER_MUNMAP, (size_t) addr, (size_t) length);
 }
 
 
@@ -233,12 +233,14 @@ int _start()
 
 #define PROT_READ 0x1
 #define PROT_WRITE 0x2
+#define MAP_PRIVATE 0x2
 #define MAP_ANONYMOUS 0x20
 
 
 void* allocate_pages(size_t page_count)
 {
-    return mmap(0, page_count * PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+    return mmap(0, page_count * PAGE_SIZE, PROT_READ | PROT_WRITE,
+                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 }
 
 void deallocate_pages(void* pages, size_t page_count)
@@ -276,13 +278,6 @@ void sa_deallocate(stack_allocator_t* alloc, u32 size)
 }
 
 
-struct global_state_t
-{
-    stack_allocator_t stack_allocator;
-    int x11_socket;
-} global_state;
-
-
 void copystr(char* dst, const char* src)
 {
     u32 i;
@@ -291,6 +286,69 @@ void copystr(char* dst, const char* src)
         dst[i] = src[i];
     }
     dst[i] = 0;
+}
+
+
+#define LOGGER_BUFFER_SIZE PAGE_SIZE
+typedef struct
+{
+    char* buffer;
+    u16 current_size;
+} logger_t;
+
+
+struct global_state_t
+{
+    stack_allocator_t stack_allocator;
+    logger_t logger;
+    int x11_socket;
+} global_state;
+
+
+void* sa_alloc(u32 size)
+{
+    return sa_allocate(&global_state.stack_allocator, size);
+}
+
+
+void sa_dealloc(u32 size)
+{
+    sa_deallocate(&global_state.stack_allocator, size);
+}
+
+
+void init_logger()
+{
+    global_state.logger.buffer = (char*) allocate_pages(1);
+    global_state.logger.current_size = 0;
+}
+
+#define STDOUT_FD 1
+void flush_logger()
+{
+    write(STDOUT_FD, global_state.logger.buffer, LOGGER_BUFFER_SIZE);
+    global_state.logger.current_size = 0;
+}
+
+
+void log_string(const char* str)
+{
+    for(u32 i = 0; str[i]; ++i)
+    {
+        if (global_state.logger.current_size == LOGGER_BUFFER_SIZE)
+        {
+            flush_logger(global_state.logger);
+        }
+        global_state.logger.buffer[global_state.logger.current_size++] = str[i];
+        
+    }
+}
+
+
+void destroy_logger()
+{
+    flush_logger();
+    deallocate_pages(global_state.logger.buffer, 1);
 }
 
 
@@ -314,18 +372,29 @@ void init_global_state()
 {
     static const u32 stack_allocator_initial_pages = 2;
     init_stack_allocator(&global_state.stack_allocator, stack_allocator_initial_pages);
+    init_logger(&global_state.logger);
 }
 
+void destroy_global_state()
+{
+    destroy_logger(&global_state.logger);
+}
 
 
 FORCE_CALL int main_function(int argc, char** argv, char** envp)
 {
+    init_global_state();
+
     if (connect_to_x11() < -1)
     {
         return 1;
     }
-    
-    write(1, envp[0], 4);
 
+    while(1)
+    {
+        log_string("Log this!\n");
+    }
+
+    destroy_global_state();
     return 0;
 }
