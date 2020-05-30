@@ -386,7 +386,7 @@ struct
 int connect_to_x11()
 {
     // TODO: Take the DISPLAY env variable in mind, dont just pick the first display
-    static const char* x11_socket_path = "/tmp/.X-unix/X0";
+    static const char* x11_socket_path = "/tmp/.X11-unix/X0";
 
     sockaddr_un addr;
     addr.sun_family = AF_UNIX;
@@ -396,6 +396,7 @@ int connect_to_x11()
     int status = connect(g_x11_state.socket_fd, &addr, sizeof(addr));
     if (status < 0)
     {
+        log_string("Failed to connect with X11!\n");
         return status;
     }
 
@@ -433,6 +434,8 @@ int connect_to_x11()
         log_string("Failed to handshake with X11!\n");
         return -1;
     }
+
+    return 0;
 }
 
 void init_global_state()
@@ -454,14 +457,9 @@ FORCE_CALL int main_function(int argc, char** argv, char** envp)
 
     if (connect_to_x11() < 0)
     {
-        return 1;
+        destroy_global_state();
+        return -1;
     }
-
-    while(1)
-    {
-        log_string("Log this!\n");
-    }
-
 
     destroy_global_state();
     return 0;
