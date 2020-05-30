@@ -160,6 +160,7 @@ FORCE_INLINE u64 syscall6(u64 n, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5)
     #error "Unsupported system."
 #endif
 
+#define SYSCALL_NUMBER_READ 0
 #define SYSCALL_NUMBER_WRITE 1
 #define SYSCALL_NUMBER_MMAP 9
 #define SYSCALL_NUMBER_MUNMAP 11
@@ -182,17 +183,23 @@ typedef struct sockaddr_un
 } sockaddr_un;
 
 
-FORCE_INLINE int connect(int fd, sockaddr_un* addr, size_t addrlen)
+int connect(int fd, sockaddr_un* addr, size_t addrlen)
 {
-    syscall3(SYSCALL_NUMBER_CONNECT, (size_t)fd, (size_t)addr, addrlen);
+    return syscall3(SYSCALL_NUMBER_CONNECT, (size_t)fd, (size_t)addr, addrlen);
 }
 
 
-FORCE_INLINE size_t write(int fd, const void *buf, size_t size)
+size_t write(int fd, const void *buf, size_t size)
 {
     return syscall3(SYSCALL_NUMBER_WRITE, fd, (size_t)buf, size);
 }
 
+
+size_t read(int fd, const void *buf, size_t size)
+{
+    return syscall3(SYSCALL_NUMBER_READ, fd, (size_t)buf, size);
+}
+  
 
 FORCE_INLINE void exit(int status)
 {
@@ -254,6 +261,7 @@ typedef struct
     u32 pages;
     u32 current_pointer;
 } stack_allocator_t;
+stack_allocator_t g_stack_allocator;
 
 
 void init_stack_allocator(stack_allocator_t* alloc, u32 pages)
@@ -278,6 +286,18 @@ void sa_deallocate(stack_allocator_t* alloc, u32 size)
 }
 
 
+void* sa_alloc(u32 size)
+{
+    return sa_allocate(&g_stack_allocator, size);
+}
+
+
+void sa_dealloc(u32 size)
+{
+    sa_deallocate(&g_stack_allocator, size);
+}
+
+
 void copystr(char* dst, const char* src)
 {
     u32 i;
@@ -289,45 +309,35 @@ void copystr(char* dst, const char* src)
 }
 
 
+void fill_memory(void* memory, u32 size, u8 value)
+{
+    for(u32 i = 0; i < size; ++i)
+    {
+        ((u8*)memory)[i] = value;
+    }
+}
+
+
 #define LOGGER_BUFFER_SIZE PAGE_SIZE
 typedef struct
 {
     char* buffer;
     u16 current_size;
 } logger_t;
-
-
-struct global_state_t
-{
-    stack_allocator_t stack_allocator;
-    logger_t logger;
-    int x11_socket;
-} global_state;
-
-
-void* sa_alloc(u32 size)
-{
-    return sa_allocate(&global_state.stack_allocator, size);
-}
-
-
-void sa_dealloc(u32 size)
-{
-    sa_deallocate(&global_state.stack_allocator, size);
-}
+logger_t g_logger;
 
 
 void init_logger()
 {
-    global_state.logger.buffer = (char*) allocate_pages(1);
-    global_state.logger.current_size = 0;
+    g_logger.buffer = (char*) allocate_pages(1);
+    g_logger.current_size = 0;
 }
 
 #define STDOUT_FD 1
 void flush_logger()
 {
-    write(STDOUT_FD, global_state.logger.buffer, LOGGER_BUFFER_SIZE);
-    global_state.logger.current_size = 0;
+    write(STDOUT_FD, g_logger.buffer, LOGGER_BUFFER_SIZE);
+    g_logger.current_size = 0;
 }
 
 
@@ -335,11 +345,11 @@ void log_string(const char* str)
 {
     for(u32 i = 0; str[i]; ++i)
     {
-        if (global_state.logger.current_size == LOGGER_BUFFER_SIZE)
+        if (g_logger.current_size == LOGGER_BUFFER_SIZE)
         {
-            flush_logger(global_state.logger);
+            flush_logger(g_logger);
         }
-        global_state.logger.buffer[global_state.logger.current_size++] = str[i];
+        g_logger.buffer[g_logger.current_size++] = str[i];
         
     }
 }
@@ -348,12 +358,30 @@ void log_string(const char* str)
 void destroy_logger()
 {
     flush_logger();
-    deallocate_pages(global_state.logger.buffer, 1);
+    deallocate_pages(g_logger.buffer, 1);
 }
 
 
 #define AF_UNIX 1
 #define SOCK_STREAM 1
+
+// Generic responses can be either Errors, Events or Replies. This is a minimal
+// struct that we can use to peak on what exactly is going on.
+typedef struct
+{
+    u8 code;
+    u8 detail;
+    u16 seq_number;
+    u32 length;
+    u32 _pad0[6];
+} x11_generic_response_header_t;
+
+
+struct
+{
+    int socket_fd;
+} g_x11_state;
+
 
 int connect_to_x11()
 {
@@ -363,21 +391,60 @@ int connect_to_x11()
     sockaddr_un addr;
     addr.sun_family = AF_UNIX;
     copystr(addr.sun_path, x11_socket_path);
-    global_state.x11_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    g_x11_state.socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     
-    return connect(global_state.x11_socket, &addr, sizeof(addr));
+    int status = connect(g_x11_state.socket_fd, &addr, sizeof(addr));
+    if (status < 0)
+    {
+        return status;
+    }
+
+    typedef struct
+    {
+        u8 byte_order;
+        u8 _pad0;
+        u16 protocol_major_version;
+        u16 protocol_minor_version;
+        u16 auth_proto_name_len;
+        u16 auth_proto_data_len;
+        u16 _pad1;
+    } handshake_request_t;
+
+    handshake_request_t handshake_request;
+    fill_memory(&handshake_request, sizeof(handshake_request_t), 0);
+    handshake_request.byte_order = 'l';
+    handshake_request.protocol_major_version = 11;
+    handshake_request.protocol_minor_version = 0;
+
+    write(g_x11_state.socket_fd, &handshake_request, sizeof(handshake_request_t));
+
+    struct
+    {
+        u8 success;
+        u8 _pad0;
+        u16 major_version;
+        u16 minor_version;
+        u16 additional_data_length;
+    } handshake_response_header;
+    read(g_x11_state.socket_fd, &handshake_response_header, sizeof(handshake_response_header));
+
+    if (handshake_response_header.success != 1)
+    {
+        log_string("Failed to handshake with X11!\n");
+        return -1;
+    }
 }
 
 void init_global_state()
 {
     static const u32 stack_allocator_initial_pages = 2;
-    init_stack_allocator(&global_state.stack_allocator, stack_allocator_initial_pages);
-    init_logger(&global_state.logger);
+    init_stack_allocator(&g_stack_allocator, stack_allocator_initial_pages);
+    init_logger(&g_logger);
 }
 
 void destroy_global_state()
 {
-    destroy_logger(&global_state.logger);
+    destroy_logger(&g_logger);
 }
 
 
@@ -385,7 +452,7 @@ FORCE_CALL int main_function(int argc, char** argv, char** envp)
 {
     init_global_state();
 
-    if (connect_to_x11() < -1)
+    if (connect_to_x11() < 0)
     {
         return 1;
     }
@@ -394,6 +461,7 @@ FORCE_CALL int main_function(int argc, char** argv, char** envp)
     {
         log_string("Log this!\n");
     }
+
 
     destroy_global_state();
     return 0;
